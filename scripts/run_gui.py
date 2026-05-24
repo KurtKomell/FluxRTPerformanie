@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QGridLayout,
     QSizePolicy,
+    QSlider,
+    QSpinBox,
 )
 
 from fluxrt import StreamProcessor
@@ -75,13 +77,18 @@ def log(msg: str) -> None:
 
 def enumerate_cameras() -> list[tuple[int, str]]:
     found = []
-    for i in range(MAX_CAM_INDEX):
-        cap = cv2.VideoCapture(i, CAM_BACKEND)
-        if not cap.isOpened() and CAM_BACKEND_FALLBACK is not None:
-            cap = cv2.VideoCapture(i, CAM_BACKEND_FALLBACK)
-        if cap.isOpened():
-            found.append((i, f"Camera {i}"))
-            cap.release()
+    prev_log_level = cv2.getLogLevel()
+    cv2.setLogLevel(2)  # suppress WARN-level backend noise during probe
+    try:
+        for i in range(MAX_CAM_INDEX):
+            cap = cv2.VideoCapture(i, CAM_BACKEND)
+            if not cap.isOpened() and CAM_BACKEND_FALLBACK is not None:
+                cap = cv2.VideoCapture(i, CAM_BACKEND_FALLBACK)
+            if cap.isOpened():
+                found.append((i, f"Camera {i}"))
+                cap.release()
+    finally:
+        cv2.setLogLevel(prev_log_level)
     return found
 
 
@@ -212,6 +219,37 @@ QComboBox:focus {{
     border-color: {ACCENT};
 }}
 
+QSpinBox {{
+    background-color: {ENTRY_BG};
+    color: {FG};
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    padding: 3px 7px;
+    min-height: 26px;
+}}
+
+QSpinBox:focus {{
+    border-color: {ACCENT};
+}}
+
+QSlider::groove:horizontal {{
+    height: 6px;
+    background: {ENTRY_BG};
+    border-radius: 3px;
+}}
+
+QSlider::handle:horizontal {{
+    width: 14px;
+    margin: -5px 0;
+    background: {ACCENT};
+    border-radius: 7px;
+}}
+
+QSlider::sub-page:horizontal {{
+    background: {ACCENT};
+    border-radius: 3px;
+}}
+
 QComboBox::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: center right;
@@ -291,6 +329,103 @@ class _Signals(QObject):
     vcam_error = Signal(str)
 
 
+# ── fullscreen output viewer ───────────────────────────────────────────────────
+class FullscreenViewer(QWidget):
+    """Borderless fullscreen window for the processed output stream."""
+
+    closed = Signal()
+    prompt_changed = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("FluxRT — Output")
+        self.setStyleSheet(f"background-color: {VIDEO_BG};")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._lbl = QLabel("No signal")
+        self._lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        layout.addWidget(self._lbl, stretch=1)
+
+        prompt_bar = QWidget()
+        prompt_bar.setObjectName("fullscreen_prompt_bar")
+        prompt_bar.setStyleSheet(
+            f"""
+            QWidget#fullscreen_prompt_bar {{
+                background-color: rgba(30, 30, 30, 220);
+                border-top: 1px solid {BORDER};
+            }}
+            QLabel {{
+                color: {FG};
+                background: transparent;
+            }}
+            """
+        )
+        prompt_layout = QHBoxLayout(prompt_bar)
+        prompt_layout.setContentsMargins(14, 8, 14, 10)
+        prompt_layout.setSpacing(8)
+        prompt_layout.addWidget(
+            QLabel("Prompt:"),
+            alignment=Qt.AlignmentFlag.AlignTop,
+        )
+        self._prompt_edit = QTextEdit()
+        self._prompt_edit.setPlaceholderText("Enter prompt…")
+        self._prompt_edit.setFixedHeight(64)
+        self._prompt_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._prompt_edit.textChanged.connect(self._emit_prompt_changed)
+        prompt_layout.addWidget(self._prompt_edit)
+        layout.addWidget(prompt_bar)
+
+    def set_prompt(self, text: str, *, emit: bool = True) -> None:
+        if self._prompt_edit.toPlainText() == text:
+            return
+        if not emit:
+            self._prompt_edit.blockSignals(True)
+        self._prompt_edit.setPlainText(text)
+        if not emit:
+            self._prompt_edit.blockSignals(False)
+
+    def _emit_prompt_changed(self) -> None:
+        self.prompt_changed.emit(self._prompt_edit.toPlainText())
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+    def closeEvent(self, event) -> None:
+        self.closed.emit()
+        super().closeEvent(event)
+
+    def show_frame(self, frame: np.ndarray | None) -> None:
+        if frame is None:
+            return
+        lw = self._lbl.width()
+        lh = self._lbl.height()
+        if lw < 10 or lh < 10:
+            geo = self.screen().availableGeometry() if self.screen() else None
+            if geo is not None:
+                lw, lh = geo.width(), geo.height()
+            else:
+                lw, lh = 1920, 1080
+        h, w = frame.shape[:2]
+        scale = min(lw / w, lh / h)
+        nw = max(1, int(w * scale))
+        nh = max(1, int(h * scale))
+        arr = np.ascontiguousarray(frame)
+        if (nw, nh) != (w, h):
+            arr = cv2.resize(arr, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        qimg = QImage(arr.data, nw, nh, nw * 3, QImage.Format.Format_RGB888).copy()
+        self._lbl.setPixmap(QPixmap.fromImage(qimg))
+
+
 # ── main window ────────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
     def __init__(self, config_path: str, use_int8: bool = False) -> None:
@@ -330,6 +465,7 @@ class MainWindow(QMainWindow):
         self._spout_sender_stop = threading.Event()
 
         self._ref_full_path: str | None = None
+        self._fullscreen: FullscreenViewer | None = None
 
         self._sig = _Signals()
         self._build_ui()
@@ -442,6 +578,43 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(self._prompt_edit, row, 1, 1, 2)
         row += 1
 
+        # Seed / guidance / denoise row
+        gen_row = self._ctrl_row()
+        gen_l = gen_row.layout()
+        gen_l.addWidget(QLabel("Seed:"))
+        self._seed_spin = QSpinBox()
+        self._seed_spin.setRange(0, 2_147_483_647)
+        self._seed_spin.setFixedWidth(120)
+        self._seed_spin.valueChanged.connect(self._on_seed_changed)
+        gen_l.addWidget(self._seed_spin)
+
+        gen_l.addSpacing(12)
+        gen_l.addWidget(QLabel("Guidance:"))
+        self._guidance_slider = QSlider(Qt.Orientation.Horizontal)
+        self._guidance_slider.setRange(0, 40)
+        self._guidance_slider.setFixedWidth(140)
+        self._guidance_slider.valueChanged.connect(self._on_guidance_changed)
+        gen_l.addWidget(self._guidance_slider)
+        self._guidance_val_lbl = QLabel("1.0")
+        self._guidance_val_lbl.setObjectName("dim")
+        self._guidance_val_lbl.setFixedWidth(36)
+        gen_l.addWidget(self._guidance_val_lbl)
+
+        gen_l.addSpacing(12)
+        gen_l.addWidget(QLabel("Denoise:"))
+        self._denoise_slider = QSlider(Qt.Orientation.Horizontal)
+        self._denoise_slider.setRange(0, 100)
+        self._denoise_slider.setFixedWidth(140)
+        self._denoise_slider.valueChanged.connect(self._on_denoise_changed)
+        gen_l.addWidget(self._denoise_slider)
+        self._denoise_val_lbl = QLabel("1.00")
+        self._denoise_val_lbl.setObjectName("dim")
+        self._denoise_val_lbl.setFixedWidth(36)
+        gen_l.addWidget(self._denoise_val_lbl)
+        gen_l.addStretch()
+        ctrl_layout.addWidget(gen_row, row, 0, 1, 3)
+        row += 1
+
         # Reference image row (conditionally visible)
         self._ref_widget = self._ctrl_row()
         ref_l = self._ref_widget.layout()
@@ -485,6 +658,9 @@ class MainWindow(QMainWindow):
         self._vcam_btn.setEnabled(False)
         self._vcam_btn.clicked.connect(self._toggle_vcam)
         btn_l.addWidget(self._vcam_btn)
+        self._fullscreen_btn = QPushButton("Fullscreen")
+        self._fullscreen_btn.clicked.connect(self._toggle_fullscreen)
+        btn_l.addWidget(self._fullscreen_btn)
         self._vcam_err_lbl = QLabel()
         self._vcam_err_lbl.setObjectName("err")
         btn_l.addWidget(self._vcam_err_lbl)
@@ -556,9 +732,56 @@ class MainWindow(QMainWindow):
                 self._prompt_edit.blockSignals(True)
                 self._prompt_edit.setPlainText(default_prompt)
                 self._prompt_edit.blockSignals(False)
+            self._load_generation_controls_from_config(cfg)
         except Exception as exc:
             log(f"Config read error: {exc}")
             self._cfg_w, self._cfg_h = 576, 320
+
+    def _load_generation_controls_from_config(self, cfg: dict) -> None:
+        seed = int(cfg.get("default_seed", 52))
+        guidance = float(cfg.get("default_guidance_scale", 1.0))
+        denoise = float(cfg.get("default_denoising_strength", 1.0))
+
+        self._seed_spin.blockSignals(True)
+        self._guidance_slider.blockSignals(True)
+        self._denoise_slider.blockSignals(True)
+        self._seed_spin.setValue(seed)
+        self._guidance_slider.setValue(int(round(guidance * 10)))
+        self._denoise_slider.setValue(int(round(np.clip(denoise, 0.0, 1.0) * 100)))
+        self._seed_spin.blockSignals(False)
+        self._guidance_slider.blockSignals(False)
+        self._denoise_slider.blockSignals(False)
+        self._guidance_val_lbl.setText(f"{guidance:.1f}")
+        self._denoise_val_lbl.setText(f"{denoise:.2f}")
+
+    def _apply_generation_params(self) -> None:
+        if self._sp is None:
+            return
+        self._apply_generation_params_to(self._sp)
+
+    def _apply_generation_params_to(self, sp: StreamProcessor) -> None:
+        sp.set_seed(self._seed_spin.value())
+        sp.set_guidance_scale(self._guidance_slider.value() / 10.0)
+        sp.set_denoising_strength(self._denoise_slider.value() / 100.0)
+
+    def _on_seed_changed(self, value: int) -> None:
+        if self._sp is not None:
+            self._sp.set_seed(value)
+        log(f"Seed: {value}")
+
+    def _on_guidance_changed(self, value: int) -> None:
+        guidance = value / 10.0
+        self._guidance_val_lbl.setText(f"{guidance:.1f}")
+        if self._sp is not None:
+            self._sp.set_guidance_scale(guidance)
+        log(f"Guidance scale: {guidance:.1f}")
+
+    def _on_denoise_changed(self, value: int) -> None:
+        strength = value / 100.0
+        self._denoise_val_lbl.setText(f"{strength:.2f}")
+        if self._sp is not None:
+            self._sp.set_denoising_strength(strength)
+        log(f"Denoising strength: {strength:.2f}")
 
     # ── cameras ────────────────────────────────────────────────────────────────
 
@@ -588,10 +811,22 @@ class MainWindow(QMainWindow):
 
     def _on_prompt_changed(self) -> None:
         prompt = self._prompt_edit.toPlainText()
+        if self._fullscreen is not None and self._fullscreen.isVisible():
+            self._fullscreen.set_prompt(prompt, emit=False)
         if self._sp is not None:
             self._sp.set_prompt(prompt)
         preview = prompt[:70] + ("…" if len(prompt) > 70 else "")
         log(f"Prompt: {preview!r}")
+
+    def _on_fullscreen_prompt_changed(self, prompt: str) -> None:
+        if self._prompt_edit.toPlainText() != prompt:
+            self._prompt_edit.blockSignals(True)
+            self._prompt_edit.setPlainText(prompt)
+            self._prompt_edit.blockSignals(False)
+        if self._sp is not None:
+            self._sp.set_prompt(prompt)
+        preview = prompt[:70] + ("…" if len(prompt) > 70 else "")
+        log(f"Prompt (fullscreen): {preview!r}")
 
     def _browse_reference(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -689,6 +924,7 @@ class MainWindow(QMainWindow):
                 sp.enable_quantization()
             sp.start()
             sp.set_prompt(prompt)
+            self._apply_generation_params_to(sp)
             self._sp = sp
             self._input_tensor = sp.get_input_tensor()
             self._output_tensor = sp.get_output_tensor()
@@ -956,6 +1192,28 @@ class MainWindow(QMainWindow):
             out = self._latest_output
         self._render_frame(self._input_lbl, inp)
         self._render_frame(self._output_lbl, out)
+        if self._fullscreen is not None and self._fullscreen.isVisible():
+            self._fullscreen.show_frame(out)
+
+    def _toggle_fullscreen(self) -> None:
+        if self._fullscreen is not None and self._fullscreen.isVisible():
+            self._fullscreen.close()
+            return
+        self._fullscreen = FullscreenViewer()
+        self._fullscreen.closed.connect(self._on_fullscreen_closed)
+        self._fullscreen.prompt_changed.connect(self._on_fullscreen_prompt_changed)
+        self._fullscreen.set_prompt(self._prompt_edit.toPlainText(), emit=False)
+        with self._frame_lock:
+            out = self._latest_output
+        self._fullscreen.showFullScreen()
+        self._fullscreen.show_frame(out)
+        self._fullscreen_btn.setText("Exit Fullscreen")
+        self.statusBar().showMessage("Fullscreen — Esc to close")
+
+    def _on_fullscreen_closed(self) -> None:
+        self._fullscreen = None
+        self._fullscreen_btn.setText("Fullscreen")
+        self.statusBar().showMessage("Ready.")
 
     def _render_frame(self, label: QLabel, frame: np.ndarray | None) -> None:
         if frame is None:
@@ -981,6 +1239,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         log("Shutting down")
+        if self._fullscreen is not None:
+            self._fullscreen.close()
         self._poll_timer.stop()
         self._capture_stop.set()
         self._vcam_stop.set()

@@ -1,7 +1,9 @@
 {
     "default_prompt" : "Make professional soft light: cyberpunk gaming room, red and violet light, soft streamer's light, warm white light, cinematic, beautiful, professional, bokeh",
     "default_steps" : 2,
-    "default_seed" : 52,
+    "default_seed" : 523465748,
+    "default_guidance_scale": 1.0,
+    "default_denoising_strength": 1.0,
     "models_path" : "FLUX.2-klein-4B",
     "int8_models_path": "FLUX.2-klein-4B-int8",
     "resolution" : {
@@ -9,15 +11,19 @@
         "width" : 576
     },
     "compile_models": true,
-    "enable_spatial_cache": true,
+    "enable_spatial_cache": false,
     "enable_int8_quantization": false,
-    "target_fps":null,
-    "interpolation_exp": 2,
-    "use_reference_image": true,
+    "target_fps":20,
+    "interpolation_exp": 1,
+    "use_reference_image": false,
     "reference_image_path": "local_samples/reference.png",
     "reference_image_resolution": {
         "height" : 256,
         "width" : 256
     },
-    "logging": false
+    "logging": false,
+	"lip_transfer": {
+    "enable": true,
+    "models_dir": "LivePortrait/liveportrait"
+}
 }

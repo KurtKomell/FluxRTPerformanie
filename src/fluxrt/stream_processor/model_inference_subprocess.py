@@ -64,7 +64,12 @@ class ModelInferenceSubprocess:
             "prompt": self.config["default_prompt"],
             "steps": self.config["default_steps"],
             "seed": self.config["default_seed"],
+            "guidance_scale": self.config.get("default_guidance_scale", 1.0),
+            "denoising_strength": self.config.get("default_denoising_strength", 1.0),
         }
+        self._generator = torch.Generator(device=self.device).manual_seed(
+            self.config["default_seed"]
+        )
 
     def load_models_without_quantization(self):
         device = self.device
@@ -144,15 +149,24 @@ class ModelInferenceSubprocess:
             self.load_models_without_quantization()
 
         if self.config.get("compile_models", False):
-            self.transformer = torch.compile(
-                self.transformer,
-            )
-            self.vae = torch.compile(
-                self.vae,
-            )
-            self.interpolation_model = torch.compile(
-                self.interpolation_model,
-            )
+            import torch._dynamo as dynamo
+
+            # Spatial cache indexes layers by block_id; allow enough specialized graphs.
+            dynamo.config.recompile_limit = 64
+
+            # Do not use mode="reduce-overhead" here: CUDA graphs conflict with
+            # in-place spatial-cache updates (sync_with_output_cache / self.valid).
+            if self.config.get("enable_spatial_cache", False):
+                self.vae = torch.compile(self.vae, dynamic=True)
+                self.interpolation_model = torch.compile(
+                    self.interpolation_model, dynamic=True
+                )
+            else:
+                self.transformer = torch.compile(self.transformer, dynamic=True)
+                self.vae = torch.compile(self.vae, dynamic=True)
+                self.interpolation_model = torch.compile(
+                    self.interpolation_model, dynamic=True
+                )
 
         reference_image_seq_len = None
         if self.config["use_reference_image"]:
@@ -299,6 +313,8 @@ class ModelInferenceSubprocess:
                     self.process_state[name] = value
                     if name == "prompt":
                         self.update_prompt_embeds(value)
+                    elif name == "seed":
+                        self._generator.manual_seed(value)
                 elif cmd == "set_reference_image":
                     image = payload  # numpy uint8 RGB array or None
                     resolution = self.config["reference_image_resolution"]
@@ -385,6 +401,7 @@ class ModelInferenceSubprocess:
 
         self.previous_frame = frame
 
+        frames_cpu = np.flip(frames_cpu, axis=2)
         return frames_cpu[..., ::-1]
 
     def send_frames(self, frames):
@@ -428,12 +445,11 @@ class ModelInferenceSubprocess:
             image=reference_list,
             height=self.resolution["height"],
             width=self.resolution["width"],
-            guidance_scale=1.0,
+            guidance_scale=self.process_state["guidance_scale"],
+            denoising_strength=self.process_state["denoising_strength"],
             num_inference_steps=self.process_state["steps"],
             num_images_per_prompt=1,
-            generator=torch.Generator(device=self.device).manual_seed(
-                self.process_state["seed"]
-            ),
+            generator=self._generator,
             output_type="np",
         )
         out_image = out.images[0]

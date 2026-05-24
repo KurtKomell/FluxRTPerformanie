@@ -708,6 +708,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         num_inference_steps: int = 50,
         sigmas: list[float] | None = None,
         guidance_scale: float = 4.0,
+        denoising_strength: float = 1.0,
         num_images_per_prompt: int = 1,
         generator: torch.Generator | list[torch.Generator] | None = None,
         latents: torch.Tensor | None = None,
@@ -893,6 +894,26 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             latents=latents,
         )
 
+        denoising_strength = float(np.clip(denoising_strength, 0.0, 1.0))
+        if denoising_strength < 1.0 and condition_images is not None:
+            source = condition_images[0].to(device=device, dtype=self.vae.dtype)
+            encoded = self._encode_vae_image(image=source, generator=generator)
+            source_packed = self._pack_latents(encoded)
+            if source_packed.shape[0] != latents.shape[0]:
+                source_packed = source_packed.expand(latents.shape[0], -1, -1)
+            latents = denoising_strength * latents + (1.0 - denoising_strength) * source_packed.to(
+                device=latents.device, dtype=latents.dtype
+            )
+
+        guidance_tensor = None
+        if getattr(self.transformer.config, "guidance_embeds", False):
+            guidance_tensor = torch.full(
+                (batch_size * num_images_per_prompt,),
+                float(guidance_scale),
+                device=device,
+                dtype=latents.dtype,
+            )
+
         image_latents = None
         image_latent_ids = None
         if condition_images is not None:
@@ -963,8 +984,9 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             if reference_image_mask is not None:
                 mask = torch.cat([mask, reference_image_mask], dim=-1)
             if self.subprocess_config["logging"]:
+                active = (mask != 0).float().sum().item()
                 print(
-                    f"recomputing {(mask.float().sum() / mask.shape[1] * 100):.2f}% of tokens"
+                    f"recomputing {(active / mask.shape[1] * 100):.2f}% of tokens"
                 )
 
         # We set the index here to remove DtoH sync, helpful especially during compilation.
@@ -1004,7 +1026,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                     noise_pred = self.transformer(
                         hidden_states=latent_model_input,  # (B, image_seq_len, C)
                         timestep=timestep / 1000,
-                        guidance=None,
+                        guidance=guidance_tensor,
                         encoder_hidden_states=prompt_embeds,
                         txt_ids=text_ids,  # B, text_seq_len, 4
                         img_ids=latent_image_ids,  # B, image_seq_len, 4
@@ -1022,7 +1044,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                         neg_noise_pred = self.transformer(
                             hidden_states=latent_model_input,
                             timestep=timestep / 1000,
-                            guidance=None,
+                            guidance=guidance_tensor,
                             encoder_hidden_states=negative_prompt_embeds,
                             txt_ids=negative_text_ids,
                             img_ids=latent_image_ids,

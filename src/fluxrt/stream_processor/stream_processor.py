@@ -81,6 +81,14 @@ class StreamProcessor:
     def set_seed(self, seed: int) -> None:
         self.model_inference_subprocess.set_param(name="seed", value=seed)
 
+    def set_guidance_scale(self, guidance_scale: float) -> None:
+        self.model_inference_subprocess.set_param(name="guidance_scale", value=guidance_scale)
+
+    def set_denoising_strength(self, denoising_strength: float) -> None:
+        self.model_inference_subprocess.set_param(
+            name="denoising_strength", value=denoising_strength
+        )
+
     def set_param(self, name: str, value) -> None:
         self.model_inference_subprocess.set_param(name=name, value=value)
 
