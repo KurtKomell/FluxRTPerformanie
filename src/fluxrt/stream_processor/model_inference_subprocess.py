@@ -66,6 +66,8 @@ class ModelInferenceSubprocess:
             "seed": self.config["default_seed"],
             "guidance_scale": self.config.get("default_guidance_scale", 1.0),
             "denoising_strength": self.config.get("default_denoising_strength", 1.0),
+            "base_shift": self.config.get("default_base_shift", 0.5),
+            "max_shift": self.config.get("default_max_shift", 1.15),
         }
         self._generator = torch.Generator(device=self.device).manual_seed(
             self.config["default_seed"]
@@ -447,6 +449,8 @@ class ModelInferenceSubprocess:
             width=self.resolution["width"],
             guidance_scale=self.process_state["guidance_scale"],
             denoising_strength=self.process_state["denoising_strength"],
+            base_shift=self.process_state["base_shift"],
+            max_shift=self.process_state["max_shift"],
             num_inference_steps=self.process_state["steps"],
             num_images_per_prompt=1,
             generator=self._generator,

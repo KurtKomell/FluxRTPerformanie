@@ -1,0 +1,8 @@
+{
+  "guidance_scale": 0.8,
+  "denoising_strength": 0.71,
+  "base_shift": 0.0,
+  "max_shift": 3.0,
+  "prompt": "Cinematic film still from a dark fantasy epic, Game of Thrones aesthetic. Two royal figures in a cold, dimly lit stone throne room. A powerful king with a rugged beard sits on a massive, sharp iron throne, wearing heavy fur cloaks and weathered leather armor. Standing before him is a fierce princess with long braided silver hair, wearing an elegant but practical dragon-scale patterned dark dress. Moody chiaroscuro lighting from high castle windows, flickering torchlight, smoke drifting through the air. Gritty atmosphere, highly detailed fabric and metal textures, photorealistic, 8k resolution.",
+  "seed": 523465748
+}

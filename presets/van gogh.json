@@ -1,0 +1,8 @@
+{
+  "guidance_scale": 0.3,
+  "denoising_strength": 0.87,
+  "base_shift": 0.0,
+  "max_shift": 3.0,
+  "prompt": "Masterpiece painting in the signature post-impressionist artistic style of Vincent van Gogh. A scenic landscape featuring swirling, turbulent yellow stars and a glowing crescent moon in a deep indigo night sky. Below, a small village with glowing windows nestled among twisting cypress trees and rolling hills. Executed with thick, heavy impasto brushstrokes, vibrant cobalt blue and fiery orange oil paint textures. Intense emotional energy, high contrast, beautiful coarse canvas texture, 8k resolution art station.\n\n\n",
+  "seed": 523465748
+}

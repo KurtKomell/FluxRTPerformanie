@@ -89,6 +89,12 @@ class StreamProcessor:
             name="denoising_strength", value=denoising_strength
         )
 
+    def set_base_shift(self, base_shift: float) -> None:
+        self.model_inference_subprocess.set_param(name="base_shift", value=base_shift)
+
+    def set_max_shift(self, max_shift: float) -> None:
+        self.model_inference_subprocess.set_param(name="max_shift", value=max_shift)
+
     def set_param(self, name: str, value) -> None:
         self.model_inference_subprocess.set_param(name=name, value=value)
 

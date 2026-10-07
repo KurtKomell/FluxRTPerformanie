@@ -9,6 +9,7 @@ optimum-quanto
 peft
 pyvirtualcam
 pyside6
+pygrabber; platform_system == "Windows"
 tensorrt
 triton-windows>=3.6,<3.7; platform_system == "Windows"
 SpoutGL; platform_system == "Windows"

@@ -1,0 +1,8 @@
+{
+  "guidance_scale": 0.3,
+  "denoising_strength": 0.75,
+  "base_shift": 0.0,
+  "max_shift": 3.0,
+  "prompt": "Cinematic, powerful hero shot of Iron Man standing completely alone on a high cliff overlooking a futuristic skyline at dusk. He is in his iconic, battle-worn red and gold metallic armor with deep scratches, soot marks, and a brightly glowing blue arc reactor. His eyes glow with intense energy. Moody, dramatic sunset lighting with orange and purple hues reflecting off the metallic surfaces. Volumetric dust particles, soft wind blowing sparks, anamorphic lens flare, shallow depth of field. Photorealistic, 8k resolution, epic movie still aesthetic.\n\n\n",
+  "seed": 523465748
+}

@@ -1,0 +1,8 @@
+{
+  "guidance_scale": 0.2,
+  "denoising_strength": 0.82,
+  "base_shift": 0.0,
+  "max_shift": 3.0,
+  "prompt": "Masterpiece painting in the signature artistic style of Gustav Klimt. A beautiful, elegant woman with a dreamy expression, wrapped in an opulent, flowing robe made of shimmering gold leaf, intricate geometric patterns, spirals, and mosaic tiles. Vibrant oil canvas textures blended with heavy metallic gold textures and colorful floral ornaments. Flat perspective with deep ornamental abstraction, rich decorative background. Ethereal, Austrian Jugendstil, high contrast, 8k resolution art station.\n\n\n",
+  "seed": 523465748
+}

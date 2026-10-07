@@ -1,0 +1,8 @@
+{
+  "guidance_scale": 0.8,
+  "denoising_strength": 0.88,
+  "base_shift": 0.0,
+  "max_shift": 3.0,
+  "prompt": "A surrealist portrait of a person in the signature artistic style of Salvador Dalí. The person has a calm, expressionless face, but their facial features and hair begin to subtly melt and dissolve into wisps of smoke and fluid geometric shapes. Their torso is hollowed out like a statue, with a small open drawer revealing a miniature glowing key inside. The figure is supported by thin wooden crutches. Background is a vast, empty desert landscape under a burning, high-contrast sky with deep, elongated shadows. Smooth oil-on-canvas texture, hyper-detailed, 8k resolution.",
+  "seed": 786453298
+}

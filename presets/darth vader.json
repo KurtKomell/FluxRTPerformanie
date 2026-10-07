@@ -1,0 +1,8 @@
+{
+  "guidance_scale": 0.0,
+  "denoising_strength": 0.82,
+  "base_shift": 0.0,
+  "max_shift": 3.0,
+  "prompt": "Cinematic shot of Darth Vader standing in a dark, atmospheric Star Wars corridor. Dramatic chiaroscuro lighting with a strong red neon glow reflecting off his glossy black helmet and intricate armor textures. Subtle smoke and embers drifting through the air. Low-angle hero shot, anamorphic lens flare, shallow depth of field with a blurry, high-tech industrial background. Photorealistic, hyper-detailed, 8k resolution, movie still aesthetic.",
+  "seed": 523465748
+}

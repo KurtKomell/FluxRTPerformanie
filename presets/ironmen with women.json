@@ -1,0 +1,8 @@
+{
+  "guidance_scale": 0.9,
+  "denoising_strength": 0.76,
+  "base_shift": 0.0,
+  "max_shift": 3.0,
+  "prompt": "Cinematic action shot from a Marvel superhero film featuring Iron Man and his wife Rescue fighting side-by-side. Iron Man is in his sleek, hyper-detailed red and gold metallic armor with a glowing blue arc reactor. Next to him, Rescue wears her elegant blue and silver nanotech iron armor, her eyes glowing. They stand amidst a smoking, debris-strewn battlefield under a dramatic sky. Intense rim lighting reflecting off the metallic surfaces, volumetric smoke, sparks, and anamorphic lens flare. Photorealistic, 8k resolution, epic movie still aesthetic.",
+  "seed": 523465748
+}

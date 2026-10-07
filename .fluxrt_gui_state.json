@@ -1,0 +1,6 @@
+{
+  "guidance_scale": 0.8,
+  "denoising_strength": 0.97,
+  "base_shift": 0.0,
+  "max_shift": 3.0
+}

@@ -1,0 +1,8 @@
+{
+  "guidance_scale": 0.8,
+  "denoising_strength": 0.76,
+  "base_shift": 0.0,
+  "max_shift": 3.0,
+  "prompt": "Cinematic action shot of a fierce dark fantasy princess in a dimly lit, ancient stone throne room. She wears a combination of a tattered dark velvet dress and ornate obsidian shoulder armor. A subtle, sharp silver crown rests on her dark hair. Moody chiaroscuro lighting, flickering torches casting long shadows, smoke drifting through the air, intense expression. High contrast, gritty texture, 35mm lens, photorealistic, 8k resolution.",
+  "seed": 523465748
+}

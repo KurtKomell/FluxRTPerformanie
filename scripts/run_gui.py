@@ -51,6 +51,9 @@ else:
     CAM_BACKEND = cv2.CAP_V4L2
     CAM_BACKEND_FALLBACK = None
 DEFAULT_CONFIG = "configs/config_with_reference.json"
+GUI_STATE_PATH = ".fluxrt_gui_state.json"
+PRESETS_DIR = "presets"
+NVIDIA_BROADCAST_MATCH = "nvidia broadcast"
 
 # ── colour tokens ────────────────────────────────────────────────────────────
 BG = "#1e1e1e"
@@ -75,21 +78,237 @@ def log(msg: str) -> None:
     print(f"[FluxRT] {msg}", flush=True)
 
 
-def enumerate_cameras() -> list[tuple[int, str]]:
-    found = []
-    prev_log_level = cv2.getLogLevel()
-    cv2.setLogLevel(2)  # suppress WARN-level backend noise during probe
+def _get_windows_camera_names() -> list[str] | None:
+    if platform.system() != "Windows":
+        return None
     try:
-        for i in range(MAX_CAM_INDEX):
-            cap = cv2.VideoCapture(i, CAM_BACKEND)
-            if not cap.isOpened() and CAM_BACKEND_FALLBACK is not None:
-                cap = cv2.VideoCapture(i, CAM_BACKEND_FALLBACK)
-            if cap.isOpened():
-                found.append((i, f"Camera {i}"))
-                cap.release()
+        from pygrabber.dshow_graph import FilterGraph
+
+        return FilterGraph().get_input_devices()
+    except ImportError:
+        log(
+            "pygrabber not installed — camera names unavailable. "
+            "Install with: pip install pygrabber"
+        )
+        return None
+    except Exception as exc:
+        log(f"DirectShow camera name lookup failed: {exc}")
+        return None
+
+
+def _is_nvidia_broadcast_name(name: str) -> bool:
+    lowered = name.lower()
+    return NVIDIA_BROADCAST_MATCH in lowered or lowered.startswith("camera (nvidia")
+
+
+def _probe_camera(index: int) -> bool:
+    prev_log_level = cv2.getLogLevel()
+    cv2.setLogLevel(2)
+    try:
+        cap = cv2.VideoCapture(index, CAM_BACKEND)
+        if not cap.isOpened() and CAM_BACKEND_FALLBACK is not None:
+            cap.release()
+            cap = cv2.VideoCapture(index, CAM_BACKEND_FALLBACK)
+        opened = cap.isOpened()
+        cap.release()
+        return opened
     finally:
         cv2.setLogLevel(prev_log_level)
+
+
+def _enumerate_cameras_windows_named() -> list[tuple[int, str]] | None:
+    names = _get_windows_camera_names()
+    if not names:
+        return None
+
+    found: list[tuple[int, str]] = []
+    for index, name in enumerate(names):
+        if _probe_camera(index) or _is_nvidia_broadcast_name(name):
+            found.append((index, name))
     return found
+
+
+def enumerate_cameras() -> list[tuple[int, str]]:
+    names: list[str] | None = None
+    if platform.system() == "Windows":
+        named = _enumerate_cameras_windows_named()
+        if named:
+            return named
+
+        names = _get_windows_camera_names()
+
+    found = []
+    for i in range(MAX_CAM_INDEX):
+        if _probe_camera(i):
+            if platform.system() == "Windows" and names and i < len(names):
+                label = names[i]
+            else:
+                label = f"Camera {i}"
+            found.append((i, label))
+    return found
+
+
+def find_nvidia_broadcast_camera(
+    cameras: list[tuple[int, str]],
+) -> tuple[int, str] | None:
+    for index, name in cameras:
+        if _is_nvidia_broadcast_name(name):
+            return index, name
+    return None
+
+
+def list_display_screens() -> list:
+    """Screens sorted left-to-right, top-to-bottom (Monitor 0 = leftmost)."""
+    screens = QApplication.screens()
+    return sorted(screens, key=lambda s: (s.geometry().x(), s.geometry().y()))
+
+
+def find_nvidia_broadcast_index() -> int | None:
+    names = _get_windows_camera_names()
+    if not names:
+        return None
+    for index, name in enumerate(names):
+        if _is_nvidia_broadcast_name(name):
+            return index
+    return None
+
+
+def _is_virtual_camera_name(name: str) -> bool:
+    lowered = name.lower()
+    return (
+        _is_nvidia_broadcast_name(name)
+        or "obs virtual camera" in lowered
+        or "virtual camera" in lowered
+    )
+
+
+def _configure_dshow_format(video_input, prefer_w: int = 1920, prefer_h: int = 1080) -> tuple[int, int]:
+    formats = video_input.get_formats()
+    rgb_formats = [fmt for fmt in formats if fmt.get("media_type_str") == "RGB24"]
+    if not rgb_formats:
+        rgb_formats = list(formats)
+    preferred = [
+        fmt
+        for fmt in rgb_formats
+        if fmt["width"] == prefer_w and fmt["height"] == prefer_h
+    ]
+    chosen = preferred[0] if preferred else max(
+        rgb_formats, key=lambda fmt: fmt["width"] * fmt["height"]
+    )
+    video_input.set_format(chosen["index"])
+    return chosen["width"], chosen["height"]
+
+
+class DirectShowCamera:
+    """DirectShow capture via pygrabber — reliable for virtual cameras."""
+
+    def __init__(self, index: int, label: str = "") -> None:
+        from pygrabber.dshow_graph import FilterGraph, FilterType
+
+        self._index = index
+        self._label = label
+        self._width = 0
+        self._height = 0
+        self._lock = threading.Lock()
+        self._latest_bgr: np.ndarray | None = None
+        self._graph = FilterGraph()
+
+        def on_frame(frame: np.ndarray) -> None:
+            # DirectShow RGB24 buffers are BGR-ordered in memory on Windows.
+            with self._lock:
+                self._latest_bgr = frame.copy()
+
+        self._graph.add_video_input_device(index)
+        video_input = self._graph.filters[FilterType.video_input]
+        self._width, self._height = _configure_dshow_format(video_input)
+        self._graph.add_sample_grabber(on_frame)
+        self._graph.add_null_render()
+        self._graph.prepare_preview_graph()
+        self._graph.run()
+        self._warmup()
+
+    def _warmup(self) -> None:
+        for _ in range(15):
+            self._graph.grab_frame()
+            time.sleep(0.03)
+            with self._lock:
+                frame = self._latest_bgr
+            if frame is not None and float(frame.std()) > 5.0:
+                return
+
+    def isOpened(self) -> bool:
+        return True
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        self._graph.grab_frame()
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline:
+            with self._lock:
+                frame = self._latest_bgr
+            if frame is not None and float(frame.std()) > 1.0:
+                return True, frame.copy()
+            time.sleep(0.005)
+        with self._lock:
+            frame = self._latest_bgr
+        if frame is None:
+            return False, None
+        return True, frame.copy()
+
+    def release(self) -> None:
+        try:
+            self._graph.stop()
+        except Exception:
+            pass
+
+
+def _opencv_capture_quality(index: int) -> float:
+    cap = cv2.VideoCapture(index, CAM_BACKEND)
+    if not cap.isOpened() and CAM_BACKEND_FALLBACK is not None:
+        cap.release()
+        cap = cv2.VideoCapture(index, CAM_BACKEND_FALLBACK)
+    if not cap.isOpened():
+        return 0.0
+    quality = 0.0
+    try:
+        for _ in range(6):
+            cap.grab()
+        ok, frame = cap.read()
+        if ok and frame is not None and frame.size > 0:
+            quality = float(frame.std())
+    finally:
+        cap.release()
+    return quality
+
+
+def open_camera(index: int, label: str = ""):
+    prefer_dshow = platform.system() == "Windows" and _is_virtual_camera_name(label)
+    if prefer_dshow:
+        cam = DirectShowCamera(index, label)
+        log(
+            f"DirectShow capture opened: {label or index} "
+            f"({cam._width}x{cam._height})"
+        )
+        return cam
+
+    quality = _opencv_capture_quality(index) if platform.system() == "Windows" else 999.0
+    if platform.system() == "Windows" and quality < 8.0:
+        try:
+            cam = DirectShowCamera(index, label)
+            log(
+                f"DirectShow fallback opened (OpenCV std={quality:.1f}): "
+                f"{label or index} ({cam._width}x{cam._height})"
+            )
+            return cam
+        except Exception as exc:
+            log(f"DirectShow fallback failed: {exc}")
+
+    cap = cv2.VideoCapture(index, CAM_BACKEND)
+    if not cap.isOpened() and CAM_BACKEND_FALLBACK is not None:
+        cap.release()
+        cap = cv2.VideoCapture(index, CAM_BACKEND_FALLBACK)
+    if cap.isOpened():
+        log(f"OpenCV capture opened: {label or index} (std={quality:.1f})")
+    return cap
 
 
 # ── stylesheet ────────────────────────────────────────────────────────────────
@@ -331,14 +550,16 @@ class _Signals(QObject):
 
 # ── fullscreen output viewer ───────────────────────────────────────────────────
 class FullscreenViewer(QWidget):
-    """Borderless fullscreen window for the processed output stream."""
+    """Separate borderless fullscreen window for the processed output stream."""
 
     closed = Signal()
-    prompt_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("FluxRT — Output")
+        self.setWindowFlags(
+            Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+        )
         self.setStyleSheet(f"background-color: {VIDEO_BG};")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -351,49 +572,6 @@ class FullscreenViewer(QWidget):
         )
         layout.addWidget(self._lbl, stretch=1)
 
-        prompt_bar = QWidget()
-        prompt_bar.setObjectName("fullscreen_prompt_bar")
-        prompt_bar.setStyleSheet(
-            f"""
-            QWidget#fullscreen_prompt_bar {{
-                background-color: rgba(30, 30, 30, 220);
-                border-top: 1px solid {BORDER};
-            }}
-            QLabel {{
-                color: {FG};
-                background: transparent;
-            }}
-            """
-        )
-        prompt_layout = QHBoxLayout(prompt_bar)
-        prompt_layout.setContentsMargins(14, 8, 14, 10)
-        prompt_layout.setSpacing(8)
-        prompt_layout.addWidget(
-            QLabel("Prompt:"),
-            alignment=Qt.AlignmentFlag.AlignTop,
-        )
-        self._prompt_edit = QTextEdit()
-        self._prompt_edit.setPlaceholderText("Enter prompt…")
-        self._prompt_edit.setFixedHeight(64)
-        self._prompt_edit.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        self._prompt_edit.textChanged.connect(self._emit_prompt_changed)
-        prompt_layout.addWidget(self._prompt_edit)
-        layout.addWidget(prompt_bar)
-
-    def set_prompt(self, text: str, *, emit: bool = True) -> None:
-        if self._prompt_edit.toPlainText() == text:
-            return
-        if not emit:
-            self._prompt_edit.blockSignals(True)
-        self._prompt_edit.setPlainText(text)
-        if not emit:
-            self._prompt_edit.blockSignals(False)
-
-    def _emit_prompt_changed(self) -> None:
-        self.prompt_changed.emit(self._prompt_edit.toPlainText())
-
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() == Qt.Key.Key_Escape:
             self.close()
@@ -404,13 +582,36 @@ class FullscreenViewer(QWidget):
         self.closed.emit()
         super().closeEvent(event)
 
+    def show_on_screen(self, screen) -> None:
+        if screen is None:
+            self.showFullScreen()
+            return
+        # showFullScreen() often opens on the primary monitor on Windows.
+        # Frameless window sized to the target screen geometry is reliable.
+        geo = screen.geometry()
+        self.setWindowFlags(
+            Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+        )
+        self.setGeometry(geo)
+        self.show()
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.setScreen(screen)
+            handle.setGeometry(geo)
+        self.setGeometry(geo)
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+        self.raise_()
+        self.activateWindow()
+
     def show_frame(self, frame: np.ndarray | None) -> None:
         if frame is None:
             return
         lw = self._lbl.width()
         lh = self._lbl.height()
         if lw < 10 or lh < 10:
-            geo = self.screen().availableGeometry() if self.screen() else None
+            geo = self.screen().geometry() if self.screen() else None
             if geo is not None:
                 lw, lh = geo.width(), geo.height()
             else:
@@ -466,6 +667,8 @@ class MainWindow(QMainWindow):
 
         self._ref_full_path: str | None = None
         self._fullscreen: FullscreenViewer | None = None
+        self._auto_select_nvidia_broadcast = True
+        self._cameras: list[tuple[int, str]] = []
 
         self._sig = _Signals()
         self._build_ui()
@@ -531,6 +734,13 @@ class MainWindow(QMainWindow):
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_cameras)
         cam_row_l.addWidget(refresh_btn)
+        self._nvidia_broadcast_btn = QPushButton("NVIDIA Broadcast")
+        self._nvidia_broadcast_btn.setToolTip(
+            "Select Camera (NVIDIA Broadcast) as input"
+        )
+        self._nvidia_broadcast_btn.clicked.connect(self._select_nvidia_broadcast)
+        self._nvidia_broadcast_btn.setVisible(platform.system() == "Windows")
+        cam_row_l.addWidget(self._nvidia_broadcast_btn)
         self._cam_err_lbl = QLabel()
         self._cam_err_lbl.setObjectName("err")
         cam_row_l.addWidget(self._cam_err_lbl)
@@ -615,6 +825,35 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(gen_row, row, 0, 1, 3)
         row += 1
 
+        # Base / max shift row
+        shift_row = self._ctrl_row()
+        shift_l = shift_row.layout()
+        shift_l.addWidget(QLabel("Base Shift:"))
+        self._base_shift_slider = QSlider(Qt.Orientation.Horizontal)
+        self._base_shift_slider.setRange(0, 200)
+        self._base_shift_slider.setFixedWidth(140)
+        self._base_shift_slider.valueChanged.connect(self._on_base_shift_changed)
+        shift_l.addWidget(self._base_shift_slider)
+        self._base_shift_val_lbl = QLabel("0.50")
+        self._base_shift_val_lbl.setObjectName("dim")
+        self._base_shift_val_lbl.setFixedWidth(42)
+        shift_l.addWidget(self._base_shift_val_lbl)
+
+        shift_l.addSpacing(12)
+        shift_l.addWidget(QLabel("Max Shift:"))
+        self._max_shift_slider = QSlider(Qt.Orientation.Horizontal)
+        self._max_shift_slider.setRange(0, 300)
+        self._max_shift_slider.setFixedWidth(140)
+        self._max_shift_slider.valueChanged.connect(self._on_max_shift_changed)
+        shift_l.addWidget(self._max_shift_slider)
+        self._max_shift_val_lbl = QLabel("1.15")
+        self._max_shift_val_lbl.setObjectName("dim")
+        self._max_shift_val_lbl.setFixedWidth(42)
+        shift_l.addWidget(self._max_shift_val_lbl)
+        shift_l.addStretch()
+        ctrl_layout.addWidget(shift_row, row, 0, 1, 3)
+        row += 1
+
         # Reference image row (conditionally visible)
         self._ref_widget = self._ctrl_row()
         ref_l = self._ref_widget.layout()
@@ -666,6 +905,56 @@ class MainWindow(QMainWindow):
         btn_l.addWidget(self._vcam_err_lbl)
         btn_l.addStretch()
         ctrl_layout.addWidget(btn_row, row, 0, 1, 3)
+        row += 1
+
+        # Fullscreen monitor row
+        fs_mon_row = self._ctrl_row()
+        fs_mon_l = fs_mon_row.layout()
+        fs_mon_l.addWidget(QLabel("Fullscreen Monitor:"))
+        self._fs_monitor_combo = QComboBox()
+        self._fs_monitor_combo.setMinimumWidth(200)
+        self._fs_monitor_combo.currentIndexChanged.connect(
+            self._update_fullscreen_monitor_info
+        )
+        fs_mon_l.addWidget(self._fs_monitor_combo)
+        fs_refresh_btn = QPushButton("Refresh")
+        fs_refresh_btn.clicked.connect(self._refresh_fullscreen_monitors)
+        fs_mon_l.addWidget(fs_refresh_btn)
+        self._fs_monitor_res_lbl = QLabel()
+        self._fs_monitor_res_lbl.setObjectName("dim")
+        fs_mon_l.addWidget(self._fs_monitor_res_lbl)
+        fs_mon_l.addStretch()
+        ctrl_layout.addWidget(fs_mon_row, row, 0, 1, 3)
+        row += 1
+
+        # Preset row
+        preset_row = self._ctrl_row()
+        preset_l = preset_row.layout()
+        preset_l.addWidget(QLabel("Preset:"))
+        self._preset_combo = QComboBox()
+        self._preset_combo.setMinimumWidth(140)
+        self._preset_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        preset_l.addWidget(self._preset_combo)
+        self._preset_load_btn = QPushButton("Load")
+        self._preset_load_btn.clicked.connect(self._load_preset_clicked)
+        preset_l.addWidget(self._preset_load_btn)
+        self._preset_name_edit = QLineEdit()
+        self._preset_name_edit.setPlaceholderText("Name…")
+        self._preset_name_edit.setFixedWidth(120)
+        preset_l.addWidget(self._preset_name_edit)
+        self._preset_save_btn = QPushButton("Save")
+        self._preset_save_btn.clicked.connect(self._save_preset_clicked)
+        preset_l.addWidget(self._preset_save_btn)
+        self._preset_refresh_btn = QPushButton("Refresh")
+        self._preset_refresh_btn.clicked.connect(self._refresh_presets)
+        preset_l.addWidget(self._preset_refresh_btn)
+        self._preset_status_lbl = QLabel()
+        self._preset_status_lbl.setObjectName("dim")
+        preset_l.addWidget(self._preset_status_lbl)
+        preset_l.addStretch()
+        ctrl_layout.addWidget(preset_row, row, 0, 1, 3)
 
         self.statusBar().showMessage("Ready.")
 
@@ -673,6 +962,8 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(ctrl_area, stretch=0)
 
         self._refresh_cameras()
+        self._refresh_presets()
+        self._refresh_fullscreen_monitors()
 
     @staticmethod
     def _ctrl_row() -> QWidget:
@@ -741,18 +1032,186 @@ class MainWindow(QMainWindow):
         seed = int(cfg.get("default_seed", 52))
         guidance = float(cfg.get("default_guidance_scale", 1.0))
         denoise = float(cfg.get("default_denoising_strength", 1.0))
+        base_shift = float(cfg.get("default_base_shift", 0.5))
+        max_shift = float(cfg.get("default_max_shift", 1.15))
 
         self._seed_spin.blockSignals(True)
         self._guidance_slider.blockSignals(True)
         self._denoise_slider.blockSignals(True)
+        self._base_shift_slider.blockSignals(True)
+        self._max_shift_slider.blockSignals(True)
         self._seed_spin.setValue(seed)
         self._guidance_slider.setValue(int(round(guidance * 10)))
         self._denoise_slider.setValue(int(round(np.clip(denoise, 0.0, 1.0) * 100)))
+        self._base_shift_slider.setValue(int(round(max(0.0, base_shift) * 100)))
+        self._max_shift_slider.setValue(int(round(max(0.0, max_shift) * 100)))
         self._seed_spin.blockSignals(False)
         self._guidance_slider.blockSignals(False)
         self._denoise_slider.blockSignals(False)
+        self._base_shift_slider.blockSignals(False)
+        self._max_shift_slider.blockSignals(False)
         self._guidance_val_lbl.setText(f"{guidance:.1f}")
         self._denoise_val_lbl.setText(f"{denoise:.2f}")
+        self._base_shift_val_lbl.setText(f"{base_shift:.2f}")
+        self._max_shift_val_lbl.setText(f"{max_shift:.2f}")
+        self._load_generation_state()
+
+    def _generation_state(self) -> dict:
+        return {
+            "guidance_scale": self._guidance_slider.value() / 10.0,
+            "denoising_strength": self._denoise_slider.value() / 100.0,
+            "base_shift": self._base_shift_slider.value() / 100.0,
+            "max_shift": self._max_shift_slider.value() / 100.0,
+        }
+
+    def _load_generation_state(self) -> None:
+        try:
+            with open(GUI_STATE_PATH, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            log(f"GUI state read error: {exc}")
+            return
+
+        self._guidance_slider.blockSignals(True)
+        self._denoise_slider.blockSignals(True)
+        self._base_shift_slider.blockSignals(True)
+        self._max_shift_slider.blockSignals(True)
+        if "guidance_scale" in state:
+            self._guidance_slider.setValue(int(round(float(state["guidance_scale"]) * 10)))
+        if "denoising_strength" in state:
+            denoise = np.clip(float(state["denoising_strength"]), 0.0, 1.0)
+            self._denoise_slider.setValue(int(round(denoise * 100)))
+        if "base_shift" in state:
+            self._base_shift_slider.setValue(
+                int(round(max(0.0, float(state["base_shift"])) * 100))
+            )
+        if "max_shift" in state:
+            self._max_shift_slider.setValue(
+                int(round(max(0.0, float(state["max_shift"])) * 100))
+            )
+        if self._base_shift_slider.value() > self._max_shift_slider.value():
+            self._max_shift_slider.setValue(self._base_shift_slider.value())
+        self._guidance_slider.blockSignals(False)
+        self._denoise_slider.blockSignals(False)
+        self._base_shift_slider.blockSignals(False)
+        self._max_shift_slider.blockSignals(False)
+        self._guidance_val_lbl.setText(f"{self._guidance_slider.value() / 10.0:.1f}")
+        self._denoise_val_lbl.setText(f"{self._denoise_slider.value() / 100.0:.2f}")
+        self._base_shift_val_lbl.setText(
+            f"{self._base_shift_slider.value() / 100.0:.2f}"
+        )
+        self._max_shift_val_lbl.setText(f"{self._max_shift_slider.value() / 100.0:.2f}")
+
+    def _save_generation_state(self) -> None:
+        try:
+            with open(GUI_STATE_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._generation_state(), f, indent=2)
+        except Exception as exc:
+            log(f"GUI state write error: {exc}")
+
+    def _preset_payload(self) -> dict:
+        state = self._generation_state()
+        state["prompt"] = self._prompt_edit.toPlainText()
+        state["seed"] = self._seed_spin.value()
+        return state
+
+    def _refresh_presets(self) -> None:
+        try:
+            os.makedirs(PRESETS_DIR, exist_ok=True)
+            current = self._preset_combo.currentText()
+            self._preset_combo.clear()
+            names = sorted(
+                os.path.splitext(f)[0]
+                for f in os.listdir(PRESETS_DIR)
+                if f.lower().endswith(".json")
+            )
+            self._preset_combo.addItems(names)
+            if current in names:
+                self._preset_combo.setCurrentText(current)
+            self._preset_status_lbl.setObjectName("dim")
+            self._preset_status_lbl.setText("")
+        except Exception as exc:
+            log(f"Preset refresh error: {exc}")
+            self._preset_status_lbl.setObjectName("err")
+            self._preset_status_lbl.setText(str(exc))
+
+    def _save_preset_clicked(self) -> None:
+        name = (
+            self._preset_name_edit.text().strip()
+            or self._preset_combo.currentText().strip()
+        )
+        if not name:
+            self._preset_status_lbl.setObjectName("err")
+            self._preset_status_lbl.setText("Name fehlt")
+            return
+        safe = "".join(
+            c for c in name if c.isalnum() or c in (" ", "_", "-")
+        ).strip()
+        if not safe:
+            self._preset_status_lbl.setObjectName("err")
+            self._preset_status_lbl.setText("Ungültiger Name")
+            return
+        path = os.path.join(PRESETS_DIR, f"{safe}.json")
+        try:
+            os.makedirs(PRESETS_DIR, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._preset_payload(), f, indent=2, ensure_ascii=False)
+            log(f"Preset saved: {path}")
+            self._refresh_presets()
+            self._preset_combo.setCurrentText(safe)
+            self._preset_name_edit.setText(safe)
+            self._preset_status_lbl.setObjectName("dim")
+            self._preset_status_lbl.setText(f"Saved: {safe}")
+        except Exception as exc:
+            log(f"Preset save error: {exc}")
+            self._preset_status_lbl.setObjectName("err")
+            self._preset_status_lbl.setText(str(exc))
+
+    def _load_preset_clicked(self) -> None:
+        name = self._preset_combo.currentText().strip()
+        if not name:
+            self._preset_status_lbl.setObjectName("err")
+            self._preset_status_lbl.setText("Kein Preset gewählt")
+            return
+        path = os.path.join(PRESETS_DIR, f"{name}.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            self._apply_preset_state(state)
+            log(f"Preset loaded: {path}")
+            self._preset_status_lbl.setObjectName("dim")
+            self._preset_status_lbl.setText(f"Loaded: {name}")
+        except FileNotFoundError:
+            log(f"Preset not found: {path}")
+            self._preset_status_lbl.setObjectName("err")
+            self._preset_status_lbl.setText("Preset nicht gefunden")
+        except Exception as exc:
+            log(f"Preset load error: {exc}")
+            self._preset_status_lbl.setObjectName("err")
+            self._preset_status_lbl.setText(str(exc))
+
+    def _apply_preset_state(self, state: dict) -> None:
+        if "prompt" in state:
+            self._prompt_edit.setPlainText(str(state["prompt"]))
+        if "seed" in state:
+            self._seed_spin.setValue(int(state["seed"]))
+        if "guidance_scale" in state:
+            self._guidance_slider.setValue(
+                int(round(float(state["guidance_scale"]) * 10))
+            )
+        if "denoising_strength" in state:
+            denoise = float(np.clip(state["denoising_strength"], 0.0, 1.0))
+            self._denoise_slider.setValue(int(round(denoise * 100)))
+        if "base_shift" in state:
+            self._base_shift_slider.setValue(
+                int(round(max(0.0, float(state["base_shift"])) * 100))
+            )
+        if "max_shift" in state:
+            self._max_shift_slider.setValue(
+                int(round(max(0.0, float(state["max_shift"])) * 100))
+            )
 
     def _apply_generation_params(self) -> None:
         if self._sp is None:
@@ -763,6 +1222,8 @@ class MainWindow(QMainWindow):
         sp.set_seed(self._seed_spin.value())
         sp.set_guidance_scale(self._guidance_slider.value() / 10.0)
         sp.set_denoising_strength(self._denoise_slider.value() / 100.0)
+        sp.set_base_shift(self._base_shift_slider.value() / 100.0)
+        sp.set_max_shift(self._max_shift_slider.value() / 100.0)
 
     def _on_seed_changed(self, value: int) -> None:
         if self._sp is not None:
@@ -774,6 +1235,7 @@ class MainWindow(QMainWindow):
         self._guidance_val_lbl.setText(f"{guidance:.1f}")
         if self._sp is not None:
             self._sp.set_guidance_scale(guidance)
+        self._save_generation_state()
         log(f"Guidance scale: {guidance:.1f}")
 
     def _on_denoise_changed(self, value: int) -> None:
@@ -781,52 +1243,112 @@ class MainWindow(QMainWindow):
         self._denoise_val_lbl.setText(f"{strength:.2f}")
         if self._sp is not None:
             self._sp.set_denoising_strength(strength)
+        self._save_generation_state()
         log(f"Denoising strength: {strength:.2f}")
+
+    def _on_base_shift_changed(self, value: int) -> None:
+        base_shift = value / 100.0
+        if value > self._max_shift_slider.value():
+            self._max_shift_slider.setValue(value)
+        self._base_shift_val_lbl.setText(f"{base_shift:.2f}")
+        if self._sp is not None:
+            self._sp.set_base_shift(base_shift)
+        self._save_generation_state()
+        log(f"Base shift: {base_shift:.2f}")
+
+    def _on_max_shift_changed(self, value: int) -> None:
+        max_shift = value / 100.0
+        if value < self._base_shift_slider.value():
+            self._base_shift_slider.setValue(value)
+        self._max_shift_val_lbl.setText(f"{max_shift:.2f}")
+        if self._sp is not None:
+            self._sp.set_max_shift(max_shift)
+        self._save_generation_state()
+        log(f"Max shift: {max_shift:.2f}")
 
     # ── cameras ────────────────────────────────────────────────────────────────
 
     def _refresh_cameras(self) -> None:
         log("Scanning for cameras…")
         cams = enumerate_cameras()
+        self._cameras = cams
+        previous_index = self._selected_cam_index()
         self._cam_combo.clear()
         if cams:
-            for _, lbl in cams:
-                self._cam_combo.addItem(lbl)
+            for index, label in cams:
+                self._cam_combo.addItem(label, userData=index)
             self._cam_err_lbl.setText("")
-            log(f"Cameras found: {[lbl for _, lbl in cams]}")
+            log(f"Cameras found: {[label for _, label in cams]}")
+            if previous_index is not None and self._select_camera_by_index(
+                previous_index
+            ):
+                pass
+            elif self._auto_select_nvidia_broadcast:
+                broadcast = find_nvidia_broadcast_camera(cams)
+                if broadcast is not None:
+                    self._select_camera_by_index(broadcast[0])
+                    log(f"Auto-selected NVIDIA Broadcast camera: {broadcast[1]}")
+                    self._auto_select_nvidia_broadcast = False
         else:
             self._cam_err_lbl.setText("No cameras found")
             log("No cameras found")
 
+    def _select_camera_by_index(self, cam_idx: int) -> bool:
+        for i in range(self._cam_combo.count()):
+            data = self._cam_combo.itemData(i, Qt.ItemDataRole.UserRole)
+            if data is not None and int(data) == cam_idx:
+                self._cam_combo.setCurrentIndex(i)
+                return True
+        return False
+
+    def _select_nvidia_broadcast(self) -> None:
+        broadcast = find_nvidia_broadcast_camera(self._cameras)
+        if broadcast is None:
+            self._refresh_cameras()
+            broadcast = find_nvidia_broadcast_camera(self._cameras)
+        if broadcast is None:
+            broadcast_index = find_nvidia_broadcast_index()
+            if broadcast_index is not None:
+                names = _get_windows_camera_names() or []
+                label = (
+                    names[broadcast_index]
+                    if broadcast_index < len(names)
+                    else f"Camera {broadcast_index}"
+                )
+                broadcast = (broadcast_index, label)
+                if not any(idx == broadcast_index for idx, _ in self._cameras):
+                    self._cameras.append(broadcast)
+                    self._cam_combo.addItem(label, userData=broadcast_index)
+        if broadcast is None:
+            self._cam_err_lbl.setText(
+                "NVIDIA Broadcast not found — start NVIDIA Broadcast app"
+            )
+            log(
+                "NVIDIA Broadcast camera not found. "
+                "Ensure NVIDIA Broadcast is running and pygrabber is installed."
+            )
+            return
+        self._select_camera_by_index(broadcast[0])
+        self._cam_err_lbl.setText("")
+        log(f"Selected NVIDIA Broadcast camera: {broadcast[1]}")
+
     def _selected_cam_index(self) -> int | None:
-        val = self._cam_combo.currentText()
-        if not val:
+        index = self._cam_combo.currentData(Qt.ItemDataRole.UserRole)
+        if index is None:
             return None
         try:
-            return int(val.split()[-1])
-        except ValueError:
+            return int(index)
+        except (TypeError, ValueError):
             return None
 
     # ── prompt / reference ─────────────────────────────────────────────────────
 
     def _on_prompt_changed(self) -> None:
         prompt = self._prompt_edit.toPlainText()
-        if self._fullscreen is not None and self._fullscreen.isVisible():
-            self._fullscreen.set_prompt(prompt, emit=False)
         if self._sp is not None:
             self._sp.set_prompt(prompt)
         preview = prompt[:70] + ("…" if len(prompt) > 70 else "")
         log(f"Prompt: {preview!r}")
-
-    def _on_fullscreen_prompt_changed(self, prompt: str) -> None:
-        if self._prompt_edit.toPlainText() != prompt:
-            self._prompt_edit.blockSignals(True)
-            self._prompt_edit.setPlainText(prompt)
-            self._prompt_edit.blockSignals(False)
-        if self._sp is not None:
-            self._sp.set_prompt(prompt)
-        preview = prompt[:70] + ("…" if len(prompt) > 70 else "")
-        log(f"Prompt (fullscreen): {preview!r}")
 
     def _browse_reference(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -892,7 +1414,13 @@ class MainWindow(QMainWindow):
                 self._cam_err_lbl.setText("No camera selected")
                 log("Start aborted: no camera selected")
                 return
-            cap = cv2.VideoCapture(cam_idx, CAM_BACKEND)
+            cam_label = self._cam_combo.currentText()
+            try:
+                cap = open_camera(cam_idx, cam_label)
+            except Exception as exc:
+                self._cam_err_lbl.setText("Cannot open camera")
+                log(f"Start aborted: cannot open camera {cam_idx}: {exc}")
+                return
             if not cap.isOpened():
                 cap.release()
                 self._cam_err_lbl.setText("Cannot open camera")
@@ -1195,20 +1723,63 @@ class MainWindow(QMainWindow):
         if self._fullscreen is not None and self._fullscreen.isVisible():
             self._fullscreen.show_frame(out)
 
+    def _refresh_fullscreen_monitors(self) -> None:
+        screens = list_display_screens()
+        previous = self._fs_monitor_combo.currentData(Qt.ItemDataRole.UserRole)
+        self._fs_monitor_combo.blockSignals(True)
+        self._fs_monitor_combo.clear()
+        for index, screen in enumerate(screens):
+            geo = screen.geometry()
+            primary = " [primary]" if screen == QApplication.primaryScreen() else ""
+            label = f"Monitor {index} ({geo.width()}×{geo.height()}){primary}"
+            self._fs_monitor_combo.addItem(label, userData=screen)
+        if previous is not None:
+            for i in range(self._fs_monitor_combo.count()):
+                if self._fs_monitor_combo.itemData(i, Qt.ItemDataRole.UserRole) == previous:
+                    self._fs_monitor_combo.setCurrentIndex(i)
+                    break
+        self._fs_monitor_combo.blockSignals(False)
+        self._update_fullscreen_monitor_info()
+
+    def _fullscreen_monitor_screen(self):
+        screen = self._fs_monitor_combo.currentData(Qt.ItemDataRole.UserRole)
+        if screen is not None:
+            return screen
+        screens = list_display_screens()
+        return screens[0] if screens else QApplication.primaryScreen()
+
+    def _update_fullscreen_monitor_info(self) -> None:
+        screen = self._fullscreen_monitor_screen()
+        if screen is None:
+            self._fs_monitor_res_lbl.setText("")
+            return
+        geo = screen.geometry()
+        name = screen.name()
+        self._fs_monitor_res_lbl.setText(
+            f"{geo.width()}×{geo.height()} @ ({geo.x()}, {geo.y()}) — {name}"
+        )
+
     def _toggle_fullscreen(self) -> None:
         if self._fullscreen is not None and self._fullscreen.isVisible():
             self._fullscreen.close()
             return
+        screen = self._fullscreen_monitor_screen()
+        if screen is None:
+            self.statusBar().showMessage("No display found for fullscreen")
+            return
+        geo = screen.geometry()
         self._fullscreen = FullscreenViewer()
         self._fullscreen.closed.connect(self._on_fullscreen_closed)
-        self._fullscreen.prompt_changed.connect(self._on_fullscreen_prompt_changed)
-        self._fullscreen.set_prompt(self._prompt_edit.toPlainText(), emit=False)
         with self._frame_lock:
             out = self._latest_output
-        self._fullscreen.showFullScreen()
+        self._fullscreen.show_on_screen(screen)
         self._fullscreen.show_frame(out)
         self._fullscreen_btn.setText("Exit Fullscreen")
-        self.statusBar().showMessage("Fullscreen — Esc to close")
+        monitor_idx = self._fs_monitor_combo.currentIndex()
+        self.statusBar().showMessage(
+            f"Fullscreen on monitor {monitor_idx} — {geo.width()}×{geo.height()} "
+            f"@ ({geo.x()}, {geo.y()}) — Esc to close"
+        )
 
     def _on_fullscreen_closed(self) -> None:
         self._fullscreen = None

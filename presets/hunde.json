@@ -1,0 +1,8 @@
+{
+  "guidance_scale": 0.8,
+  "denoising_strength": 0.74,
+  "base_shift": 0.0,
+  "max_shift": 3.0,
+  "prompt": "Cinematic film still featuring three different dogs sitting side-by-side on a rustic wooden park bench covered in autumn leaves. In the center, a large, fluffy Bernese Mountain Dog with a happy expression. To its left, a sleek, alert Jack Russell Terrier. To its right, a majestic black Labrador Retriever looking curious. Warm, golden autumn sunlight filtering through orange trees, creating a soft bokeh effect. Highly detailed fur textures, shallow depth of field, photorealistic, 8k resolution, heartwarming movie aesthetic.",
+  "seed": 523465748
+}

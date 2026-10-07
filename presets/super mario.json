@@ -1,0 +1,8 @@
+{
+  "guidance_scale": 0.8,
+  "denoising_strength": 0.71,
+  "base_shift": 0.0,
+  "max_shift": 3.0,
+  "prompt": "Cinematic live-action film still of Super Mario and Luigi standing together in a vibrant, hyper-detailed Mushroom Kingdom. Mario is a rugged Italian plumber with a realistic mustache, wearing a weathered red cap and rugged denim overalls. Next to him, Luigi in his green cap looks around anxiously. Giant, glowing neon mushrooms tower over them, casting colorful light. Sun rays cutting through a magical misty forest, floating pollen particles, anamorphic lens flare. Epic fantasy movie aesthetic, photorealistic, 8k resolution, cinematic lighting.\n\n\n",
+  "seed": 523465748
+}

@@ -108,6 +108,22 @@ def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
     return float(mu)
 
 
+def calculate_shift(
+    image_seq_len: int,
+    base_shift: float,
+    max_shift: float,
+    base_image_seq_len: int,
+    max_image_seq_len: int,
+) -> float:
+    if max_image_seq_len == base_image_seq_len:
+        return float(max_shift)
+
+    slope = (max_shift - base_shift) / (max_image_seq_len - base_image_seq_len)
+    intercept = base_shift - slope * base_image_seq_len
+    shifted = slope * image_seq_len + intercept
+    return float(np.clip(shifted, min(base_shift, max_shift), max(base_shift, max_shift)))
+
+
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
     scheduler,
@@ -709,6 +725,8 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         sigmas: list[float] | None = None,
         guidance_scale: float = 4.0,
         denoising_strength: float = 1.0,
+        base_shift: float | None = None,
+        max_shift: float | None = None,
         num_images_per_prompt: int = 1,
         generator: torch.Generator | list[torch.Generator] | None = None,
         latents: torch.Tensor | None = None,
@@ -939,9 +957,31 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         ):
             sigmas = None
         image_seq_len = latents.shape[1]
-        mu = compute_empirical_mu(
-            image_seq_len=image_seq_len, num_steps=num_inference_steps
+        mu = compute_empirical_mu(image_seq_len=image_seq_len, num_steps=num_inference_steps)
+
+        cfg_base_shift = float(
+            self.scheduler.config.base_shift if base_shift is None else base_shift
         )
+        cfg_max_shift = float(
+            self.scheduler.config.max_shift if max_shift is None else max_shift
+        )
+        default_shift = calculate_shift(
+            image_seq_len=image_seq_len,
+            base_shift=float(self.scheduler.config.base_shift),
+            max_shift=float(self.scheduler.config.max_shift),
+            base_image_seq_len=int(self.scheduler.config.base_image_seq_len),
+            max_image_seq_len=int(self.scheduler.config.max_image_seq_len),
+        )
+        user_shift = calculate_shift(
+            image_seq_len=image_seq_len,
+            base_shift=cfg_base_shift,
+            max_shift=cfg_max_shift,
+            base_image_seq_len=int(self.scheduler.config.base_image_seq_len),
+            max_image_seq_len=int(self.scheduler.config.max_image_seq_len),
+        )
+        if default_shift > 0:
+            mu *= user_shift / default_shift
+
         timesteps, num_inference_steps = retrieve_timesteps(
             self.scheduler,
             num_inference_steps,

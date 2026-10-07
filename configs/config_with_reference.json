@@ -4,24 +4,26 @@
     "default_seed" : 523465748,
     "default_guidance_scale": 1.0,
     "default_denoising_strength": 1.0,
+    "default_base_shift": 0.5,
+    "default_max_shift": 1.15,
     "models_path" : "FLUX.2-klein-4B",
     "int8_models_path": "FLUX.2-klein-4B-int8",
     "resolution" : {
-        "height" : 320,
-        "width" : 576
+        "height" : 256,
+        "width" : 448
     },
     "compile_models": true,
     "enable_spatial_cache": false,
-    "enable_int8_quantization": false,
+    "enable_int8_quantization": true,
     "target_fps":20,
-    "interpolation_exp": 1,
-    "use_reference_image": false,
+    "interpolation_exp": 3,
+    "use_reference_image": true,
     "reference_image_path": "local_samples/reference.png",
     "reference_image_resolution": {
         "height" : 256,
-        "width" : 256
+        "width" : 448
     },
-    "logging": false,
+    "logging": true,
 	"lip_transfer": {
     "enable": true,
     "models_dir": "LivePortrait/liveportrait"
